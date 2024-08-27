@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 type Server struct {
@@ -59,18 +61,44 @@ func (this *Server) BroadCast(user *User, msg string) {
 	this.Message <- sendMsg
 }
 
+// server连接成功后处理逻辑
 func (this *Server) Handle(conn net.Conn) {
 	// 当前连接的业务
 	fmt.Println("连接建立成功")
-	user := NewUser(conn)
-	// 用户上线
-	this.mapLock.Lock()
-	this.OnlineMap[user.Name] = user
-	this.mapLock.Unlock()
-	// 广播上线消息
-	this.BroadCast(user, "已上线")
+	user := NewUser(conn, this)
+	user.Online()
+	isLive := make(chan bool)
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buf)
+			if n == 0 {
+				user.Offline()
+				return
+			}
+			if err != nil && err != io.EOF {
+				fmt.Println("conn.Read err:", err)
+				return
+			}
+			msg := string(buf[:n-1])
+			user.DoMessage(msg)
+
+			isLive <- true
+		}
+	}()
 	// 当前handel阻塞
-	select {}
+	for {
+		select {
+		case <-isLive:
+			// 当前用户活跃
+		case <-time.After(time.Second * 10):
+			// 已经超时, 将当前User强制关闭
+			user.SendMsg("你被踢了")
+			close(user.C)
+			conn.Close()
+			return
+		}
+	}
 }
 
 // 监听Message的goroutine， 一旦有消息就会发给所有在线的User
